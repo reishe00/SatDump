@@ -3,6 +3,7 @@
 #include "logger.h"
 #include <filesystem>
 #include "imgui/imgui.h"
+#include <stdexcept>
 #include "common/utils.h"
 #include "pkt_parser.h"
 #include "msg_parser.h"
@@ -31,6 +32,61 @@ namespace inmarsat
                 do_save_files = parameters["save_files"].get<bool>();
             else
                 do_save_files = true;
+
+            auto parse_packet_list = [&](const char *key, std::unordered_set<uint8_t> &target_set) {
+                if (!parameters.contains(key))
+                    return;
+
+                if (!parameters[key].is_array())
+                {
+                    logger->warn("%s must be an array; ignoring", key);
+                    return;
+                }
+
+                try
+                {
+                    for (const auto &v : parameters[key])
+                    {
+                        uint32_t value = 0;
+                        if (v.is_string())
+                        {
+                            std::string s = v.get<std::string>();
+                            value = std::stoul(s, nullptr, 0);
+                        }
+                        else if (v.is_number_unsigned())
+                        {
+                            value = v.get<uint32_t>();
+                        }
+                        else if (v.is_number_integer())
+                        {
+                            int32_t temp = v.get<int32_t>();
+                            if (temp < 0)
+                                throw std::runtime_error("Negative packet id not allowed");
+                            value = static_cast<uint32_t>(temp);
+                        }
+                        else
+                        {
+                            logger->warn("%s entry ignored (unsupported type)", key);
+                            continue;
+                        }
+
+                        if (value > 0xFF)
+                        {
+                            logger->warn("%s entry 0x%X out of range, ignored", key, value);
+                            continue;
+                        }
+
+                        target_set.insert(static_cast<uint8_t>(value));
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    logger->warn("Failed parsing %s list: %s", key, e.what());
+                }
+            };
+
+            parse_packet_list("save_packet_ids", d_save_packet_ids);
+            parse_packet_list("skip_packet_ids", d_skip_packet_ids);
 
             if (parameters.contains("station_id"))
                 d_station_id = parameters["station_id"].get<std::string>();
@@ -61,6 +117,8 @@ namespace inmarsat
 
         void STDCParserModule::process_final_pkt(nlohmann::json &msg)
         {
+            int id = get_packet_frm_id(msg);
+
             // UDP
             {
                 for (auto &c : udp_clients)
@@ -85,9 +143,9 @@ namespace inmarsat
             }
 
             // File
-            if (do_save_files)
+            if (do_save_files && should_save_packet(id))
             {
-                std::string pkt_name = get_id_name(get_packet_frm_id(msg));
+                std::string pkt_name = get_id_name(id);
                 if (msg.contains("pkt_name"))
                     pkt_name = msg["pkt_name"];
 
@@ -424,6 +482,17 @@ namespace inmarsat
         std::shared_ptr<ProcessingModule> STDCParserModule::getInstance(std::string input_file, std::string output_file_hint, nlohmann::json parameters)
         {
             return std::make_shared<STDCParserModule>(input_file, output_file_hint, parameters);
+        }
+
+        bool STDCParserModule::should_save_packet(int id) const
+        {
+            if (!d_skip_packet_ids.empty() && d_skip_packet_ids.count(id))
+                return false;
+
+            if (d_save_packet_ids.empty())
+                return true;
+
+            return d_save_packet_ids.count(id) > 0;
         }
     }
 }
