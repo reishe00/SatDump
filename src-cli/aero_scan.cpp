@@ -90,6 +90,10 @@ int main_aero_scan(int argc, char *argv[])
     int min_spacing_hz = parameters.value("min_spacing_hz", 10000);
     (void)corr_threshold;
 
+    satdump::tle_file_override = parameters.contains("tle_override") ? parameters["tle_override"].get<std::string>() : "";
+    satdump::initSatdump();
+    completeLoggerInit();
+
     parameters["baseband_format"] = "cf32";
     parameters["buffer_size"] = dsp::STREAM_BUFFER_SIZE;
     parameters["start_timestamp"] = (double)time(0);
