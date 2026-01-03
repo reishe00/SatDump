@@ -4,6 +4,7 @@
 #include "decode_utils.h"
 #include <fstream>
 #include "common/net/udp.h"
+#include <unordered_set>
 
 namespace inmarsat
 {
@@ -30,8 +31,11 @@ namespace inmarsat
             bool do_save_files;
             std::vector<std::shared_ptr<net::UDPClient>> udp_clients;
             std::string d_station_id = "";
+            std::unordered_set<uint8_t> d_save_packet_ids;
+            std::unordered_set<uint8_t> d_skip_packet_ids;
 
             bool is_gui = false;
+            bool should_save_packet(int id) const;
 
         public:
             STDCParserModule(std::string input_file, std::string output_file_hint, nlohmann::json parameters);

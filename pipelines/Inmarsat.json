@@ -33,7 +33,11 @@
             },
             "msg": {
                 "inmarsat_stdc_parser": {
+                    // save_files: master on/off for writing to disk (defaults to true)
+                    // save_packet_ids / skip_packet_ids: optional filters (hex strings or ints)
                     "save_files": true,
+                    //"save_packet_ids": ["0x30", "0x01"],
+                    //"skip_packet_ids": ["0x07"],
                     "station_id": ""
                     //,"udp_sinks": {
                     //"test": {
