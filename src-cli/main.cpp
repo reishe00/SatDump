@@ -4,6 +4,7 @@
 #include "offline.h"
 #include "record.h"
 #include "autotrack/autotrack.h"
+#include "aero_scan.h"
 
 #include "sdr_probe.h"
 #include "help_general.h"
@@ -37,6 +38,12 @@ int main(int argc, char *argv[])
     else if (std::string(argv[1]) == "autotrack")
     {
         int ret = main_autotrack(argc, argv);
+        if (ret != 0)
+            return ret;
+    }
+    else if (std::string(argv[1]) == "aero_scan")
+    {
+        int ret = main_aero_scan(argc, argv);
         if (ret != 0)
             return ret;
     }
