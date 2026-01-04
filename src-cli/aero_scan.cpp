@@ -203,8 +203,8 @@ int main_aero_scan(int argc, char *argv[])
 
                                          for (int i = 0; i < fft_size; i++)
                                          {
-                                             fftw_in[i][0] = buf[i].real();
-                                             fftw_in[i][1] = buf[i].imag();
+                                            fftw_in[i][0] = buf[i].real;
+                                            fftw_in[i][1] = buf[i].imag;
                                          }
 
                                          fftwf_execute(plan);
