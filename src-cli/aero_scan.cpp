@@ -154,6 +154,7 @@ int main_aero_scan(int argc, char *argv[])
     std::unique_ptr<dsp::VFOSplitterBlock> splitter_vfo;
     std::unique_ptr<dsp::FFTPanBlock> fft;
     std::unique_ptr<dsp::SplitterBlock> splitter;
+    std::atomic<uint64_t> fft_cb_count{0};
     ctpl::thread_pool live_thread_pool(64);
 
     try
@@ -177,6 +178,7 @@ int main_aero_scan(int argc, char *argv[])
 
         fft->on_fft = [&, fft_size, samplerate](float *fft_vals)
         {
+            uint64_t cb_id = ++fft_cb_count;
             std::vector<float> values(fft_size);
             for (int i = 0; i < fft_size; i++)
                 values[i] = fft_vals[i];
@@ -184,10 +186,9 @@ int main_aero_scan(int argc, char *argv[])
             std::vector<float> sorted = values;
             std::nth_element(sorted.begin(), sorted.begin() + fft_size / 2, sorted.end());
             float noise_floor = sorted[fft_size / 2];
-            if (noise_floor <= 0)
-                return;
+            float safe_noise = noise_floor > 1e-9f ? noise_floor : 1e-9f;
 
-            float threshold = noise_floor * powf(10.0f, snr_margin_db / 10.0f);
+            float threshold = safe_noise * powf(10.0f, snr_margin_db / 10.0f);
             double bin_hz = samplerate / fft_size;
             auto now = std::chrono::steady_clock::now();
 
@@ -197,6 +198,22 @@ int main_aero_scan(int argc, char *argv[])
 
             static int dbg_fft = 0;
             float max_bin = *std::max_element(values.begin(), values.end());
+            float min_bin = *std::min_element(values.begin(), values.end());
+            int max_idx = int(std::max_element(values.begin(), values.end()) - values.begin());
+
+            if (dbg_fft < 50)
+            {
+                logger->info("FFT dbg %d (cb %llu): nf=%.6e thr=%.6e max=%.6e min=%.6e max_idx=%d candidates=%zu",
+                             dbg_fft,
+                             (unsigned long long)cb_id,
+                             noise_floor,
+                             threshold,
+                             max_bin,
+                             min_bin,
+                             max_idx,
+                             candidates.size());
+                dbg_fft++;
+            }
 
             for (int i = 0; i < fft_size; i++)
             {
@@ -240,16 +257,15 @@ int main_aero_scan(int argc, char *argv[])
                     ++it;
             }
 
-            if (dbg_fft < 30)
+            if (cb_id % 1000 == 0)
             {
-                logger->info("FFT dbg %d: noise_floor=%.6f threshold=%.6f max_bin=%.6f candidates_now=%zu hits_first=%d",
-                             dbg_fft,
+                logger->info("FFT heartbeat: callbacks=%llu nf=%.6e thr=%.6e max=%.6e min=%.6e candidates_now=%zu",
+                             (unsigned long long)cb_id,
                              noise_floor,
                              threshold,
                              max_bin,
-                             candidates.size(),
-                             candidates.empty() ? 0 : candidates.begin()->second.hits);
-                dbg_fft++;
+                             min_bin,
+                             candidates.size());
             }
         };
 
