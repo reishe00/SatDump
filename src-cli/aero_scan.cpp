@@ -5,7 +5,6 @@
 #include "common/dsp_source_sink/dsp_sample_source.h"
 #include "common/dsp/path/splitter_vfo.h"
 #include "common/dsp/path/splitter.h"
-#include "common/dsp/fft/fft_pan.h"
 #include "core/live_pipeline.h"
 #include <filesystem>
 #include <atomic>
@@ -17,6 +16,8 @@
 #include <csignal>
 #include <cmath>
 #include <vector>
+#include <thread>
+#include <fftw3.h>
 #include "libs/ctpl/ctpl_stl.h"
 
 namespace
@@ -152,9 +153,9 @@ int main_aero_scan(int argc, char *argv[])
     std::atomic<int> vfo_counter{0};
 
     std::unique_ptr<dsp::VFOSplitterBlock> splitter_vfo;
-    std::unique_ptr<dsp::FFTPanBlock> fft;
     std::unique_ptr<dsp::SplitterBlock> splitter;
-    std::atomic<uint64_t> fft_cb_count{0};
+    std::thread psd_thread;
+    std::atomic<bool> psd_running{true};
     ctpl::thread_pool live_thread_pool(64);
 
     try
@@ -170,107 +171,105 @@ int main_aero_scan(int argc, char *argv[])
         splitter_vfo = std::make_unique<dsp::VFOSplitterBlock>(splitter->get_output("vfo"));
         splitter_vfo->set_main_enabled(false);
 
-        fft = std::make_unique<dsp::FFTPanBlock>(splitter->get_output("fft"));
         int fft_size = parameters.value("fft_size", 2048);
-        int fft_rate = parameters.value("fft_rate", 50);
-        fft->set_fft_settings(fft_size, samplerate, fft_rate);
-        fft->avg_num = parameters.value("fft_avgn", 3.0f);
+        double bin_hz = samplerate / fft_size;
+        auto fft_stream = splitter->get_output("fft");
 
-        fft->on_fft = [&, fft_size, samplerate](float *fft_vals)
-        {
-            uint64_t cb_id = ++fft_cb_count;
-            std::vector<float> values(fft_size);
-            for (int i = 0; i < fft_size; i++)
-                values[i] = fft_vals[i];
+        // Start PSD worker thread using FFTW directly
+        psd_thread = std::thread([&, fft_size, bin_hz]()
+                                 {
+                                     std::vector<complex_t> buf(fft_size);
+                                     fftwf_complex *fftw_in = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * fft_size);
+                                     fftwf_complex *fftw_out = (fftwf_complex *)fftwf_malloc(sizeof(fftwf_complex) * fft_size);
+                                     fftwf_plan plan = fftwf_plan_dft_1d(fft_size, fftw_in, fftw_out, FFTW_FORWARD, FFTW_ESTIMATE);
 
-            std::vector<float> sorted = values;
-            std::nth_element(sorted.begin(), sorted.begin() + fft_size / 2, sorted.end());
-            float noise_floor = sorted[fft_size / 2];
-            float safe_noise = noise_floor > 1e-9f ? noise_floor : 1e-9f;
+                                     std::vector<float> mags(fft_size);
 
-            float threshold = safe_noise * powf(10.0f, snr_margin_db / 10.0f);
-            double bin_hz = samplerate / fft_size;
-            auto now = std::chrono::steady_clock::now();
+                                     while (psd_running.load())
+                                     {
+                                         int got = fft_stream->read();
+                                         if (got <= 0)
+                                         {
+                                             fft_stream->flush();
+                                             continue;
+                                         }
 
-            std::lock_guard<std::mutex> lk(state_mutex);
+                                         int copy_n = std::min(got, fft_size);
+                                         memcpy(buf.data(), fft_stream->readBuf, copy_n * sizeof(complex_t));
+                                         fft_stream->flush();
 
-            std::set<int> seen_bins;
+                                         if (copy_n < fft_size)
+                                             continue;
 
-            static int dbg_fft = 0;
-            float max_bin = *std::max_element(values.begin(), values.end());
-            float min_bin = *std::min_element(values.begin(), values.end());
-            int max_idx = int(std::max_element(values.begin(), values.end()) - values.begin());
+                                         for (int i = 0; i < fft_size; i++)
+                                         {
+                                             fftw_in[i][0] = buf[i].real();
+                                             fftw_in[i][1] = buf[i].imag();
+                                         }
 
-            if (dbg_fft < 50)
-            {
-                logger->info("FFT dbg %d (cb %llu): nf=%.6e thr=%.6e max=%.6e min=%.6e max_idx=%d candidates=%zu",
-                             dbg_fft,
-                             (unsigned long long)cb_id,
-                             noise_floor,
-                             threshold,
-                             max_bin,
-                             min_bin,
-                             max_idx,
-                             candidates.size());
-                dbg_fft++;
-            }
+                                         fftwf_execute(plan);
 
-            for (int i = 0; i < fft_size; i++)
-            {
-                if (values[i] < threshold)
-                    continue;
+                                         for (int i = 0; i < fft_size; i++)
+                                             mags[i] = fftw_out[i][0] * fftw_out[i][0] + fftw_out[i][1] * fftw_out[i][1];
 
-                double offset = (double(i) - (fft_size / 2)) * bin_hz;
-                if (std::abs(offset) > (samplerate / 2))
-                    continue;
-                int rounded_bin = int(std::round(offset / 100.0) * 100.0);
+                                         std::vector<float> sorted = mags;
+                                         std::nth_element(sorted.begin(), sorted.begin() + fft_size / 2, sorted.end());
+                                         float noise_floor = sorted[fft_size / 2];
+                                         float safe_noise = noise_floor > 1e-9f ? noise_floor : 1e-9f;
+                                         float threshold = safe_noise * powf(10.0f, snr_margin_db / 10.0f);
+                                         auto now = std::chrono::steady_clock::now();
 
-                if (seen_bins.count(rounded_bin))
-                    continue;
-                seen_bins.insert(rounded_bin);
+                                         std::lock_guard<std::mutex> lk(state_mutex);
+                                         std::set<int> seen_bins;
 
-                bool near_active = false;
-                for (auto &kv : active_vfos)
-                {
-                    if (fabs(kv.second.offset_hz - offset) < min_spacing_hz)
-                    {
-                        kv.second.last_seen = now;
-                        near_active = true;
-                        break;
-                    }
-                }
-                if (near_active)
-                    continue;
+                                         for (int i = 0; i < fft_size; i++)
+                                         {
+                                             if (mags[i] < threshold)
+                                                 continue;
 
-                auto &cand = candidates[rounded_bin];
-                cand.offset_hz = offset;
-                cand.hits += 1;
-                cand.last_seen = now;
-            }
+                                             double offset = (double(i) - (fft_size / 2)) * bin_hz;
+                                             if (std::abs(offset) > (samplerate / 2))
+                                                 continue;
+                                             int rounded_bin = int(std::round(offset / 100.0) * 100.0);
 
-            // expire stale candidates
-            for (auto it = candidates.begin(); it != candidates.end();)
-            {
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.last_seen).count() > drop_miss_ms)
-                    it = candidates.erase(it);
-                else
-                    ++it;
-            }
+                                             if (seen_bins.count(rounded_bin))
+                                                 continue;
+                                             seen_bins.insert(rounded_bin);
 
-            if (cb_id % 1000 == 0)
-            {
-                logger->info("FFT heartbeat: callbacks=%llu nf=%.6e thr=%.6e max=%.6e min=%.6e candidates_now=%zu",
-                             (unsigned long long)cb_id,
-                             noise_floor,
-                             threshold,
-                             max_bin,
-                             min_bin,
-                             candidates.size());
-            }
-        };
+                                             bool near_active = false;
+                                             for (auto &kv : active_vfos)
+                                             {
+                                                 if (fabs(kv.second.offset_hz - offset) < min_spacing_hz)
+                                                 {
+                                                     kv.second.last_seen = now;
+                                                     near_active = true;
+                                                     break;
+                                                 }
+                                             }
+                                             if (near_active)
+                                                 continue;
+
+                                             auto &cand = candidates[rounded_bin];
+                                             cand.offset_hz = offset;
+                                             cand.hits += 1;
+                                             cand.last_seen = now;
+                                         }
+
+                                         for (auto it = candidates.begin(); it != candidates.end();)
+                                         {
+                                             if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.last_seen).count() > drop_miss_ms)
+                                                 it = candidates.erase(it);
+                                             else
+                                                 ++it;
+                                         }
+                                     }
+
+                                     fftwf_destroy_plan(plan);
+                                     fftwf_free(fftw_in);
+                                     fftwf_free(fftw_out);
+                                 });
 
         splitter->start();
-        fft->start();
         splitter_vfo->start();
     }
     catch (std::exception &e)
@@ -378,10 +377,12 @@ int main_aero_scan(int argc, char *argv[])
     }
 
     logger->warn("Stopping scanner...");
-    fft->stop();
     splitter_vfo->stop();
     splitter->stop();
     source_ptr->stop();
+    psd_running.store(false);
+    if (psd_thread.joinable())
+        psd_thread.join();
 
     for (auto &kv : active_vfos)
     {
