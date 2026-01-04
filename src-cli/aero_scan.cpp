@@ -160,6 +160,7 @@ int main_aero_scan(int argc, char *argv[])
     std::thread psd_thread;
     std::atomic<bool> psd_running{true};
     std::deque<std::chrono::steady_clock::time_point> promotion_times;
+    bool psd_thread_started = false;
     ctpl::thread_pool live_thread_pool(64);
 
     try
@@ -288,6 +289,7 @@ int main_aero_scan(int argc, char *argv[])
                                      fftwf_free(fftw_in);
                                      fftwf_free(fftw_out);
                                  });
+        psd_thread_started = true;
 
         splitter->start();
         splitter_vfo->start();
@@ -295,6 +297,9 @@ int main_aero_scan(int argc, char *argv[])
     catch (std::exception &e)
     {
         logger->error("Fatal error starting scanner: %s", e.what());
+        psd_running.store(false);
+        if (psd_thread_started && psd_thread.joinable())
+            psd_thread.join();
         return 1;
     }
 
@@ -416,7 +421,7 @@ int main_aero_scan(int argc, char *argv[])
     splitter->stop();
     source_ptr->stop();
     psd_running.store(false);
-    if (psd_thread.joinable())
+    if (psd_thread_started && psd_thread.joinable())
         psd_thread.join();
 
     for (auto &kv : active_vfos)
