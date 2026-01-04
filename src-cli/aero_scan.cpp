@@ -195,6 +195,9 @@ int main_aero_scan(int argc, char *argv[])
 
             std::set<int> seen_bins;
 
+            static int dbg_fft = 0;
+            float max_bin = *std::max_element(values.begin(), values.end());
+
             for (int i = 0; i < fft_size; i++)
             {
                 if (values[i] < threshold)
@@ -236,10 +239,22 @@ int main_aero_scan(int argc, char *argv[])
                 else
                     ++it;
             }
+
+            if (dbg_fft < 30)
+            {
+                logger->info("FFT dbg %d: noise_floor=%.6f threshold=%.6f max_bin=%.6f candidates_now=%zu hits_first=%d",
+                             dbg_fft,
+                             noise_floor,
+                             threshold,
+                             max_bin,
+                             candidates.size(),
+                             candidates.empty() ? 0 : candidates.begin()->second.hits);
+                dbg_fft++;
+            }
         };
 
-        fft->start();
         splitter->start();
+        fft->start();
         splitter_vfo->start();
     }
     catch (std::exception &e)
