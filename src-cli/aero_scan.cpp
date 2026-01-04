@@ -4,6 +4,7 @@
 #include "common/cli_utils.h"
 #include "common/dsp_source_sink/dsp_sample_source.h"
 #include "common/dsp/path/splitter_vfo.h"
+#include "common/dsp/path/splitter.h"
 #include "common/dsp/fft/fft_pan.h"
 #include "core/live_pipeline.h"
 #include <filesystem>
@@ -152,16 +153,23 @@ int main_aero_scan(int argc, char *argv[])
 
     std::unique_ptr<dsp::VFOSplitterBlock> splitter_vfo;
     std::unique_ptr<dsp::FFTPanBlock> fft;
+    std::unique_ptr<dsp::SplitterBlock> splitter;
     ctpl::thread_pool live_thread_pool(64);
 
     try
     {
         source_ptr->start();
-        splitter_vfo = std::make_unique<dsp::VFOSplitterBlock>(source_ptr->output_stream);
-        splitter_vfo->set_main_enabled(false);
-        splitter_vfo->start();
 
-        fft = std::make_unique<dsp::FFTPanBlock>(source_ptr->output_stream);
+        splitter = std::make_unique<dsp::SplitterBlock>(source_ptr->output_stream);
+        splitter->add_output("fft");
+        splitter->add_output("vfo");
+        splitter->set_enabled("fft", true);
+        splitter->set_enabled("vfo", true);
+
+        splitter_vfo = std::make_unique<dsp::VFOSplitterBlock>(splitter->get_output("vfo"));
+        splitter_vfo->set_main_enabled(false);
+
+        fft = std::make_unique<dsp::FFTPanBlock>(splitter->get_output("fft"));
         int fft_size = parameters.value("fft_size", 2048);
         int fft_rate = parameters.value("fft_rate", 50);
         fft->set_fft_settings(fft_size, samplerate, fft_rate);
@@ -231,6 +239,8 @@ int main_aero_scan(int argc, char *argv[])
         };
 
         fft->start();
+        splitter->start();
+        splitter_vfo->start();
     }
     catch (std::exception &e)
     {
@@ -339,6 +349,7 @@ int main_aero_scan(int argc, char *argv[])
     logger->warn("Stopping scanner...");
     fft->stop();
     splitter_vfo->stop();
+    splitter->stop();
     source_ptr->stop();
 
     for (auto &kv : active_vfos)
