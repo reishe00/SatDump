@@ -190,6 +190,7 @@ int main_aero_scan(int argc, char *argv[])
 
                                      std::vector<float> mags(fft_size);
                                      int heartbeat = 0;
+                                     logger->info("PSD worker started");
 
                                      while (psd_running.load())
                                      {
@@ -200,6 +201,9 @@ int main_aero_scan(int argc, char *argv[])
                                              {
                                                  fft_stream->flush();
                                                  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                                                 heartbeat++;
+                                                 if (heartbeat % 200 == 0)
+                                                     logger->info("PSD heartbeat: candidates=%zu (no samples)", candidates.size());
                                                  continue;
                                              }
 
@@ -275,15 +279,15 @@ int main_aero_scan(int argc, char *argv[])
 
                                              heartbeat++;
                                              if (heartbeat % 200 == 0)
-                                             {
                                                  logger->info("PSD heartbeat: candidates=%zu threshold=%.3e noise=%.3e", candidates.size(), threshold, noise_floor);
-                                             }
                                          }
                                          catch (std::exception &e)
                                          {
                                              logger->error("PSD worker error: %s", e.what());
                                          }
                                      }
+
+                                     logger->info("PSD worker stopping");
 
                                      fftwf_destroy_plan(plan);
                                      fftwf_free(fftw_in);
@@ -317,6 +321,15 @@ int main_aero_scan(int argc, char *argv[])
 
         {
             std::unique_lock<std::mutex> lk(state_mutex);
+
+            // Age out stale candidates even if PSD stalled
+            for (auto it = candidates.begin(); it != candidates.end();)
+            {
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.last_seen).count() > drop_miss_ms)
+                    it = candidates.erase(it);
+                else
+                    ++it;
+            }
 
             for (auto &kv : candidates)
             {
