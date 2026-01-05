@@ -264,7 +264,29 @@ namespace inmarsat
                 ambed = new AmbeDecoder();
                 audio_out = new int16_t[160 * 25];
                 std::string directory = d_output_file_hint.substr(0, d_output_file_hint.rfind('/'));
-                file_wav = new std::ofstream(directory + "/audio.wav", std::ios::binary);
+
+                auto now = time(nullptr);
+                std::tm *utc_tm = gmtime(&now);
+                auto two_digit = [](int v)
+                {
+                    std::string s = std::to_string(v);
+                    if (s.size() == 1)
+                        s = "0" + s;
+                    return s;
+                };
+
+                std::string wav_name = two_digit(utc_tm->tm_mday) + two_digit(utc_tm->tm_mon + 1) +
+                                       std::to_string(utc_tm->tm_year + 1900) + "_" +
+                                       two_digit(utc_tm->tm_hour) + two_digit(utc_tm->tm_min) + two_digit(utc_tm->tm_sec);
+
+                std::string wav_path = directory + "/" + wav_name + ".wav";
+                int suffix = 1;
+                while (std::filesystem::exists(wav_path))
+                {
+                    wav_path = directory + "/" + wav_name + "_" + std::to_string(suffix++) + ".wav";
+                }
+
+                file_wav = new std::ofstream(wav_path, std::ios::binary);
                 wav_out = new dsp::WavWriter(*file_wav);
                 wav_out->write_header(8000, 1);
             }
